@@ -56,7 +56,6 @@ void loop()
 {
 }
 
-
 static uint8_t cur_buf[1000];
 void fsm(uint8_t buf);
 
@@ -72,8 +71,8 @@ uint8_t recv_buf[RECV_DATA_SIZE];
 uint16_t* recv_num = (uint16_t*)recv_buf;
 uint16_t recv_index = 0;
 uint8_t recv_count = 0;
-unsigned long last_recv_time = 0; // 上次接收数据的时间
-uint8_t error_count = 0; // 连续错误计数
+unsigned long last_recv_time = 0;
+uint8_t error_count = 0; 
 
 void serialRecvTask(void* arg)
 {
@@ -159,55 +158,59 @@ void taskDrawWave(void* arg)
     }
 }
 
-void drawWave(uint8_t* data, size_t len, int y_range) {
-  const int screen_w = 240;
-  const int screen_h = 128;
-  const int adc_max = 4095;
-  const int ch_samples = len / 4; // 每个通道 uint16_t 数量：8000字节 / 4 = 2000
+const int screen_w = 240;
+const int screen_h = 128;
+const int adc_max = 4095;
 
-  float bin_size = (float)ch_samples / screen_w;
+void drawWave(uint8_t* data, size_t len, int y_range)
+{
 
-  tft.fillRect(0, 0, screen_w, screen_h, TFT_BLACK);
+    const int ch_samples = len / 4; // 每通道样本数
+    float bin_size = (float)ch_samples / screen_w;
 
-  int prev_y_ch1 = 0, prev_y_ch2 = 0;
-  bool first = true;
+    int prev_y_ch1 = -1;
+    int prev_y_ch2 = -1;
 
-  for (int x = 0; x < screen_w; x++) {
-    int start_idx = round(x * bin_size);
-    int end_idx = round((x + 1) * bin_size);
-    if (end_idx > ch_samples) end_idx = ch_samples;
+    for (int x = 0; x < screen_w; x++) {
+        // 1. 垂直擦除整列
+        tft.drawFastVLine(x, 0, screen_h, TFT_BLACK);
 
-    uint32_t sum_ch1 = 0, sum_ch2 = 0;
-    int count = 0;
+        // 2. 区间数据平均
+        int start_idx = round(x * bin_size);
+        int end_idx = round((x + 1) * bin_size);
+        if (end_idx > ch_samples)
+            end_idx = ch_samples;
 
-    for (int i = start_idx; i < end_idx; i++) {
-      uint16_t ch1 = data[i * 4] | (data[i * 4 + 1] << 8);
-      uint16_t ch2 = data[i * 4 + 2] | (data[i * 4 + 3] << 8);
-      sum_ch1 += ch1;
-      sum_ch2 += ch2;
-      count++;
+        uint32_t sum_ch1 = 0, sum_ch2 = 0;
+        int count = 0;
+
+        for (int i = start_idx; i < end_idx; i++) {
+            uint16_t ch1 = data[i * 4] | (data[i * 4 + 1] << 8);
+            uint16_t ch2 = data[i * 4 + 2] | (data[i * 4 + 3] << 8);
+            sum_ch1 += ch1;
+            sum_ch2 += ch2;
+            count++;
+        }
+
+        if (count == 0)
+            continue;
+
+        int avg_ch1 = sum_ch1 / count;
+        int avg_ch2 = sum_ch2 / count;
+
+        int y_ch1 = screen_h - (avg_ch1 * y_range / adc_max);
+        int y_ch2 = screen_h - (avg_ch2 * y_range / adc_max);
+
+        y_ch1 = constrain(y_ch1, 0, screen_h - 1);
+        y_ch2 = constrain(y_ch2, 0, screen_h - 1);
+
+        // 3. 连线绘制（通道1: 绿，通道2: 红）
+        if (x > 0 && prev_y_ch1 >= 0 && prev_y_ch2 >= 0) {
+            tft.drawLine(x - 1, prev_y_ch1, x, y_ch1, TFT_GREEN);
+            tft.drawLine(x - 1, prev_y_ch2, x, y_ch2, TFT_RED);
+        }
+
+        prev_y_ch1 = y_ch1;
+        prev_y_ch2 = y_ch2;
     }
-
-    if (count == 0) continue;
-
-    int avg_ch1 = sum_ch1 / count;
-    int avg_ch2 = sum_ch2 / count;
-
-    int y_ch1 = screen_h - (avg_ch1 * y_range / adc_max);
-    int y_ch2 = screen_h - (avg_ch2 * y_range / adc_max);
-
-    y_ch1 = constrain(y_ch1, 0, screen_h - 1);
-    y_ch2 = constrain(y_ch2, 0, screen_h - 1);
-
-    if (!first) {
-      tft.drawLine(x - 1, prev_y_ch1, x, y_ch1, TFT_GREEN); // 通道1 绿色
-      tft.drawLine(x - 1, prev_y_ch2, x, y_ch2, TFT_RED);   // 通道2 红色
-    } else {
-      first = false;
-    }
-
-    prev_y_ch1 = y_ch1;
-    prev_y_ch2 = y_ch2;
-  }
 }
-
