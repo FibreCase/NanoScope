@@ -3,21 +3,38 @@
 
 #define DEV_DEBUG_FLAG 1
 
+#define DAC_PIN 25
+
+#define CHANNELS 2
+
+struct ChannelData {
+    uint16_t vpp[CHANNELS];
+    uint16_t vmean[CHANNELS];
+    float frequency[CHANNELS];
+};
+
+ChannelData calulateResults = { { 0, 0 }, { 0, 0 }, { 0.0f, 0.0f } };
+
+void showCalulateResults(ChannelData results);
+ChannelData calculateWave(uint8_t* data);
+
 HardwareSerial dataSerial(1);
 TFT_eSPI tft = TFT_eSPI();
 
 SemaphoreHandle_t fsm_mutex;
-SemaphoreHandle_t draw_binary;
+SemaphoreHandle_t tft_mutex;
+SemaphoreHandle_t data_binary;
 
 void drawWave(uint8_t* data, size_t len, int y_range);
 
-void taskDrawWave(void* arg);
+void taskTftRefresh(void* arg);
 void serialRecvTask(void* arg);
 
 void setup()
 {
     fsm_mutex = xSemaphoreCreateMutex();
-    draw_binary = xSemaphoreCreateBinary();
+    tft_mutex = xSemaphoreCreateMutex();
+    data_binary = xSemaphoreCreateBinary();
 
     pinMode(2, OUTPUT);
     digitalWrite(2, HIGH);
@@ -38,16 +55,17 @@ void setup()
     tft.println("Simple Oscilloscope");
 
     digitalWrite(2, LOW);
-    delay(1000);
+    delay(2000);
 
     dataSerial.flush(false);
     Serial.flush(false);
 
-    xTaskCreate(taskDrawWave, "DrawWave", 4096, NULL, 2, NULL);
+    dataSerial.write(0x01);
+
+    xTaskCreate(taskTftRefresh, "TftRefresh", 4096, NULL, 2, NULL);
     xTaskCreate(serialRecvTask, "SerialRecv", 4096, NULL, 1, NULL);
 
     Serial.println("ESP32 Started - Ready to receive data");
-    dataSerial.write(0x01);
 
     digitalWrite(2, HIGH);
 }
@@ -72,7 +90,7 @@ uint16_t* recv_num = (uint16_t*)recv_buf;
 uint16_t recv_index = 0;
 uint8_t recv_count = 0;
 unsigned long last_recv_time = 0;
-uint8_t error_count = 0; 
+uint8_t error_count = 0;
 
 void serialRecvTask(void* arg)
 {
@@ -130,7 +148,7 @@ void fsm(uint8_t buf)
         if (recv_index >= RECV_DATA_SIZE) {
             if (DEV_DEBUG_FLAG)
                 Serial.printf("Frame %d | %d | %d\n", recv_count++, recv_num[0], recv_num[1]);
-            xSemaphoreGive(draw_binary);
+            xSemaphoreGive(data_binary);
             status = SERIAL_FSM_IDLE;
             error_count = 0;
         }
@@ -149,11 +167,14 @@ void fsm(uint8_t buf)
 size_t waveLen = 8000;
 int waveYRange = 128;
 
-void taskDrawWave(void* arg)
+void taskTftRefresh(void* arg)
 {
     while (1) {
-        if (xSemaphoreTake(draw_binary, portMAX_DELAY) == pdTRUE) {
+        if (xSemaphoreTake(data_binary, portMAX_DELAY) == pdTRUE && xSemaphoreTake(tft_mutex, portMAX_DELAY) == pdTRUE) {
             drawWave(recv_buf, waveLen, waveYRange);
+            calulateResults = calculateWave(recv_buf);
+            showCalulateResults(calulateResults);
+            xSemaphoreGive(tft_mutex);
         }
     }
 }
@@ -213,4 +234,82 @@ void drawWave(uint8_t* data, size_t len, int y_range)
         prev_y_ch1 = y_ch1;
         prev_y_ch2 = y_ch2;
     }
+}
+
+#define SAMPLE_RATE 500000 // 500kHz采样率
+
+void showCalulateResults(ChannelData results)
+{
+    tft.setCursor(0, 156);
+    tft.setTextFont(2);
+    tft.printf("CH1 %4.1f Vpp, %8.1f Hz\n", results.vpp[0] * 3.3f / adc_max, results.frequency[0]);
+    tft.printf("CH2 %4.1f Vpp, %8.1f Hz\n", results.vpp[1] * 3.3f / adc_max, results.frequency[1]);
+}
+
+ChannelData calculateWave(uint8_t* data)
+{
+
+    ChannelData results = { { 0, 0 }, { 0, 0 }, { 0.0f, 0.0f } };
+
+    // 计算每个通道的 Vpp
+    uint16_t max_ch1 = 0;
+    uint16_t min_ch1 = 4095;
+    uint16_t max_ch2 = 0;
+    uint16_t min_ch2 = 4095;
+
+    for (int i = 0; i < RECV_DATA_SIZE / 4; i++) {
+        uint16_t ch1 = data[i * 4] | (data[i * 4 + 1] << 8);
+        uint16_t ch2 = data[i * 4 + 2] | (data[i * 4 + 3] << 8);
+
+        if (ch1 > max_ch1)
+            max_ch1 = ch1;
+        if (ch1 < min_ch1)
+            min_ch1 = ch1;
+        if (ch2 > max_ch2)
+            max_ch2 = ch2;
+        if (ch2 < min_ch2)
+            min_ch2 = ch2;
+    }
+
+    results.vpp[0] = max_ch1 - min_ch1;
+    results.vpp[1] = max_ch2 - min_ch2;
+
+    // 计算每个通道的 Vmean
+    results.vmean[0] = (max_ch1 + min_ch1) / 2;
+    results.vmean[1] = (max_ch2 + min_ch2) / 2;
+
+    // 计算每个通道的频率
+    const int samples = RECV_DATA_SIZE / 4; // 每个通道2000个采样点
+    int zero_crossings[2] = { 0 }; // 零交叉次数
+    int16_t last_sample[2] = { 0 };
+
+    for (int i = 0; i < samples; i++) {
+        // 解码交错数据
+        uint16_t ch1 = data[i * 4 + 0] | (data[i * 4 + 1] << 8); // 通道1
+        uint16_t ch2 = data[i * 4 + 2] | (data[i * 4 + 3] << 8); // 通道2
+
+        // 转换为有符号 centered 值（12-bit ADC：0~4095 -> 中心2048）
+        int16_t ch1_val = (int16_t)ch1 - 2048;
+        int16_t ch2_val = (int16_t)ch2 - 2048;
+
+        if (i > 0) {
+            // 检测零交叉：从负到正或正到负
+            if ((last_sample[0] < 0 && ch1_val >= 0) || (last_sample[0] > 0 && ch1_val <= 0)) {
+                zero_crossings[0]++;
+            }
+            if ((last_sample[1] < 0 && ch2_val >= 0) || (last_sample[1] > 0 && ch2_val <= 0)) {
+                zero_crossings[1]++;
+            }
+        }
+
+        last_sample[0] = ch1_val;
+        last_sample[1] = ch2_val;
+    }
+
+    // 每两个零交叉构成一个完整周期
+    float time_seconds = (float)samples / SAMPLE_RATE;
+    results.frequency[0] = (zero_crossings[0] / 2) / time_seconds;
+    results.frequency[1] = (zero_crossings[1] / 2) / time_seconds;
+
+    return results;
 }
