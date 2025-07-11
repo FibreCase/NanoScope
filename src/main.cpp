@@ -3,7 +3,8 @@
 
 #define DEV_DEBUG_FLAG 1
 
-#define DAC_PIN 25
+#define DAC_B_PIN 25
+#define DAV_A_PIN 26
 
 #define CHANNELS 2
 
@@ -15,26 +16,32 @@ struct ChannelData {
 
 ChannelData calulateResults = { { 0, 0 }, { 0, 0 }, { 0.0f, 0.0f } };
 
-void showCalulateResults(ChannelData results);
-ChannelData calculateWave(uint8_t* data);
+void showInfo(ChannelData results);
+ChannelData calculateInfo(uint8_t* data);
 
 HardwareSerial dataSerial(1);
 TFT_eSPI tft = TFT_eSPI();
 
 SemaphoreHandle_t fsm_mutex;
 SemaphoreHandle_t tft_mutex;
-SemaphoreHandle_t data_binary;
+SemaphoreHandle_t freq_mutex;
+EventGroupHandle_t data_ready_event_group;
 
-void drawWave(uint8_t* data, size_t len, int y_range);
+#define TASK1_EVENT_BIT (1 << 0)
+#define TASK2_EVENT_BIT (1 << 0)
 
-void taskTftRefresh(void* arg);
+void drawWave(uint8_t* data, size_t len, int y_range, int x_offset, int y_offset);
+
+void taskWaveRefresh(void* arg);
+void taskInfoRefresh(void* arg);
 void serialRecvTask(void* arg);
 
 void setup()
 {
     fsm_mutex = xSemaphoreCreateMutex();
     tft_mutex = xSemaphoreCreateMutex();
-    data_binary = xSemaphoreCreateBinary();
+    freq_mutex = xSemaphoreCreateMutex();
+    data_ready_event_group = xEventGroupCreate();
 
     pinMode(2, OUTPUT);
     digitalWrite(2, HIGH);
@@ -60,13 +67,11 @@ void setup()
     dataSerial.flush(false);
     Serial.flush(false);
 
-    dataSerial.write(0x01);
-
-    xTaskCreate(taskTftRefresh, "TftRefresh", 4096, NULL, 2, NULL);
+    xTaskCreate(taskWaveRefresh, "TftRefresh", 4096, NULL, 2, NULL);
+    xTaskCreate(taskInfoRefresh, "InfoRefresh", 4096, NULL, 2, NULL);
     xTaskCreate(serialRecvTask, "SerialRecv", 4096, NULL, 1, NULL);
 
     Serial.println("ESP32 Started - Ready to receive data");
-
     digitalWrite(2, HIGH);
 }
 
@@ -79,15 +84,22 @@ void fsm(uint8_t buf);
 
 #define SERIAL_FSM_IDLE 1
 #define SERIAL_FSM_HEADER 2
-#define SERIAL_FSM_DATA 3
+#define SERIAL_FSM_FREQ_DATA 3
+#define SERIAL_FSM_ADC_DATA 4
 
-#define RECV_DATA_SIZE 8000
+#define RECV_FREQ_DATA_SIZE 2 * 4
+#define RECV_ADC_DATA_SIZE 4000 * 2
 #define TIMEOUT_MS 1000 // 超时时间1秒
 
 uint8_t status = SERIAL_FSM_IDLE;
-uint8_t recv_buf[RECV_DATA_SIZE];
-uint16_t* recv_num = (uint16_t*)recv_buf;
-uint16_t recv_index = 0;
+
+uint8_t recv_freq_buf[RECV_FREQ_DATA_SIZE];
+uint32_t recv_freq_num[2] = { 0, 0 };
+uint8_t recv_freq_index = 0;
+
+uint8_t recv_adc_buf[RECV_ADC_DATA_SIZE];
+uint16_t recv_adc_index = 0;
+
 uint8_t recv_count = 0;
 unsigned long last_recv_time = 0;
 uint8_t error_count = 0;
@@ -98,7 +110,7 @@ void serialRecvTask(void* arg)
         if (status != SERIAL_FSM_IDLE && millis() - last_recv_time > TIMEOUT_MS) {
             Serial.println("Timeout - Reset to IDLE");
             status = SERIAL_FSM_IDLE;
-            recv_index = 0;
+            recv_adc_index = 0;
             error_count = 0;
         }
         last_recv_time = millis();
@@ -132,8 +144,8 @@ void fsm(uint8_t buf)
 
     case SERIAL_FSM_HEADER:
         if (buf == 0xFE) {
-            recv_index = 0;
-            status = SERIAL_FSM_DATA;
+            recv_freq_index = 0;
+            status = SERIAL_FSM_FREQ_DATA;
             error_count = 0;
         } else {
             if (DEV_DEBUG_FLAG)
@@ -143,12 +155,21 @@ void fsm(uint8_t buf)
         }
         break;
 
-    case SERIAL_FSM_DATA:
-        recv_buf[recv_index++] = buf;
-        if (recv_index >= RECV_DATA_SIZE) {
+    case SERIAL_FSM_FREQ_DATA:
+        recv_freq_buf[recv_freq_index++] = buf;
+        if (recv_freq_index >= RECV_FREQ_DATA_SIZE) {
+            status = SERIAL_FSM_ADC_DATA;
+            recv_adc_index = 0;
+            error_count = 0;
+        }
+        break;
+
+    case SERIAL_FSM_ADC_DATA:
+        recv_adc_buf[recv_adc_index++] = buf;
+        if (recv_adc_index >= RECV_ADC_DATA_SIZE) {
             if (DEV_DEBUG_FLAG)
-                Serial.printf("Frame %d | %d | %d\n", recv_count++, recv_num[0], recv_num[1]);
-            xSemaphoreGive(data_binary);
+                // Serial.printf("Frame %d | %d | %d | %d | %d\n", recv_count++, ((uint32_t*)recv_freq_buf)[0], ((uint32_t*)recv_freq_buf)[1], ((uint16_t*)recv_adc_buf)[0], ((uint16_t*)recv_adc_buf)[1]);
+                xEventGroupSetBits(data_ready_event_group, TASK1_EVENT_BIT | TASK2_EVENT_BIT);
             status = SERIAL_FSM_IDLE;
             error_count = 0;
         }
@@ -158,22 +179,26 @@ void fsm(uint8_t buf)
         if (DEV_DEBUG_FLAG)
             Serial.println("FSM Error - Reset to IDLE");
         status = SERIAL_FSM_IDLE;
-        recv_index = 0;
+        recv_adc_index = 0;
+        recv_freq_index = 0;
         error_count = 0;
         break;
     }
 }
 
-size_t waveLen = 8000;
-int waveYRange = 128;
+int waveXRange = 4000; // 200 - 8000 4000测249khz
+int waveYRange = 128; // 16 - 1024
+int waveXOffset = 0; // 0 - 8000 / waveXRange
+int waveYOffset = 0; // 
 
-void taskTftRefresh(void* arg)
+void taskWaveRefresh(void* arg)
 {
-    while (1) {
-        if (xSemaphoreTake(data_binary, portMAX_DELAY) == pdTRUE && xSemaphoreTake(tft_mutex, portMAX_DELAY) == pdTRUE) {
-            drawWave(recv_buf, waveLen, waveYRange);
-            calulateResults = calculateWave(recv_buf);
-            showCalulateResults(calulateResults);
+    for (;;) {
+        xEventGroupWaitBits(data_ready_event_group, TASK1_EVENT_BIT, pdTRUE, pdFALSE, portMAX_DELAY);
+        if (xSemaphoreTake(tft_mutex, portMAX_DELAY) == pdTRUE) {
+            {
+                drawWave(recv_adc_buf, waveXRange, waveYRange, waveXOffset, waveYOffset);
+            }
             xSemaphoreGive(tft_mutex);
         }
     }
@@ -183,7 +208,7 @@ const int screen_w = 240;
 const int screen_h = 128;
 const int adc_max = 4095;
 
-void drawWave(uint8_t* data, size_t len, int y_range)
+void drawWave(uint8_t* data, size_t len, int y_range, int x_offset, int y_offset)
 {
 
     const int ch_samples = len / 4; // 每通道样本数
@@ -206,8 +231,8 @@ void drawWave(uint8_t* data, size_t len, int y_range)
         int count = 0;
 
         for (int i = start_idx; i < end_idx; i++) {
-            uint16_t ch1 = data[i * 4] | (data[i * 4 + 1] << 8);
-            uint16_t ch2 = data[i * 4 + 2] | (data[i * 4 + 3] << 8);
+            uint16_t ch1 = data[(i + x_offset) * 4] | (data[(i + x_offset) * 4 + 1] << 8);
+            uint16_t ch2 = data[(i + x_offset) * 4 + 2] | (data[(i + x_offset) * 4 + 3] << 8);
             sum_ch1 += ch1;
             sum_ch2 += ch2;
             count++;
@@ -219,8 +244,8 @@ void drawWave(uint8_t* data, size_t len, int y_range)
         int avg_ch1 = sum_ch1 / count;
         int avg_ch2 = sum_ch2 / count;
 
-        int y_ch1 = screen_h - (avg_ch1 * y_range / adc_max);
-        int y_ch2 = screen_h - (avg_ch2 * y_range / adc_max);
+        int y_ch1 = screen_h - (avg_ch1 * y_range / adc_max + y_offset);
+        int y_ch2 = screen_h - (avg_ch2 * y_range / adc_max + y_offset);
 
         y_ch1 = constrain(y_ch1, 0, screen_h - 1);
         y_ch2 = constrain(y_ch2, 0, screen_h - 1);
@@ -236,17 +261,42 @@ void drawWave(uint8_t* data, size_t len, int y_range)
     }
 }
 
-#define SAMPLE_RATE 500000 // 500kHz采样率
+void taskInfoRefresh(void* arg)
+{
+    for (;;) {
+        xEventGroupWaitBits(data_ready_event_group, TASK2_EVENT_BIT, pdTRUE, pdFALSE, portMAX_DELAY);
+        calulateResults = calculateInfo(recv_adc_buf);
+        calulateResults.frequency[0] = ((uint32_t*)recv_freq_buf)[0] / 1000.0f;
+        calulateResults.frequency[1] = ((uint32_t*)recv_freq_buf)[1] / 1000.0f;
+        // dacWrite(DAV_A_PIN, (calulateResults.vmean[0] + calulateResults.vpp[0] * 0.4) / 16);
+        // dacWrite(DAC_B_PIN, (calulateResults.vmean[1] + calulateResults.vpp[1] * 0.4) / 16);
+        dacWrite(DAV_A_PIN, (calulateResults.vmean[0] + calulateResults.vpp[0] * 0.4) / 16);
+        dacWrite(DAC_B_PIN, (calulateResults.vmean[1] + calulateResults.vpp[1] * 0.4) / 16);
+        Serial.printf("Frame %d | CH1: %d , %2.2f , %d | CH2: %d , %2.2f , %d\n",
+            recv_count++, calulateResults.vpp[0], calulateResults.vmean[0] * 3.3 / 4096, ((uint32_t*)recv_freq_buf)[0],
+            calulateResults.vpp[1], calulateResults.vmean[1] * 3.3 / 4096, ((uint32_t*)recv_freq_buf)[1]);
+        if (xSemaphoreTake(tft_mutex, portMAX_DELAY) == pdTRUE) {
+            {
+                showInfo(calulateResults);
+            }
+            xSemaphoreGive(tft_mutex);
+        }
+    }
+}
 
-void showCalulateResults(ChannelData results)
+void showInfo(ChannelData results)
 {
     tft.setCursor(0, 156);
     tft.setTextFont(2);
-    tft.printf("CH1 %4.1f Vpp, %8.1f Hz\n", results.vpp[0] * 3.3f / adc_max, results.frequency[0]);
-    tft.printf("CH2 %4.1f Vpp, %8.1f Hz\n", results.vpp[1] * 3.3f / adc_max, results.frequency[1]);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.printf("CH1 %4.1f Vpp, %8.2f kHz   \n", calulateResults.vpp[0] * 3.3 / 4096, calulateResults.frequency[0]);
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.printf("CH2 %4.1f Vpp, %8.2f kHz   \n", calulateResults.vpp[1] * 3.3 / 4096, calulateResults.frequency[1]);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.printf("Frame %d \n", recv_count);
 }
 
-ChannelData calculateWave(uint8_t* data)
+ChannelData calculateInfo(uint8_t* data)
 {
 
     ChannelData results = { { 0, 0 }, { 0, 0 }, { 0.0f, 0.0f } };
@@ -257,7 +307,7 @@ ChannelData calculateWave(uint8_t* data)
     uint16_t max_ch2 = 0;
     uint16_t min_ch2 = 4095;
 
-    for (int i = 0; i < RECV_DATA_SIZE / 4; i++) {
+    for (int i = 0; i < RECV_ADC_DATA_SIZE / 4; i++) {
         uint16_t ch1 = data[i * 4] | (data[i * 4 + 1] << 8);
         uint16_t ch2 = data[i * 4 + 2] | (data[i * 4 + 3] << 8);
 
@@ -271,45 +321,12 @@ ChannelData calculateWave(uint8_t* data)
             min_ch2 = ch2;
     }
 
-    results.vpp[0] = max_ch1 - min_ch1;
-    results.vpp[1] = max_ch2 - min_ch2;
+    results.vpp[0] = (max_ch1 - min_ch1) < 0 ? 0 : (max_ch1 - min_ch1);
+    results.vpp[1] = (max_ch2 - min_ch2) < 0 ? 0 : (max_ch2 - min_ch2);
 
     // 计算每个通道的 Vmean
     results.vmean[0] = (max_ch1 + min_ch1) / 2;
     results.vmean[1] = (max_ch2 + min_ch2) / 2;
-
-    // 计算每个通道的频率
-    const int samples = RECV_DATA_SIZE / 4; // 每个通道2000个采样点
-    int zero_crossings[2] = { 0 }; // 零交叉次数
-    int16_t last_sample[2] = { 0 };
-
-    for (int i = 0; i < samples; i++) {
-        // 解码交错数据
-        uint16_t ch1 = data[i * 4 + 0] | (data[i * 4 + 1] << 8); // 通道1
-        uint16_t ch2 = data[i * 4 + 2] | (data[i * 4 + 3] << 8); // 通道2
-
-        // 转换为有符号 centered 值（12-bit ADC：0~4095 -> 中心2048）
-        int16_t ch1_val = (int16_t)ch1 - 2048;
-        int16_t ch2_val = (int16_t)ch2 - 2048;
-
-        if (i > 0) {
-            // 检测零交叉：从负到正或正到负
-            if ((last_sample[0] < 0 && ch1_val >= 0) || (last_sample[0] > 0 && ch1_val <= 0)) {
-                zero_crossings[0]++;
-            }
-            if ((last_sample[1] < 0 && ch2_val >= 0) || (last_sample[1] > 0 && ch2_val <= 0)) {
-                zero_crossings[1]++;
-            }
-        }
-
-        last_sample[0] = ch1_val;
-        last_sample[1] = ch2_val;
-    }
-
-    // 每两个零交叉构成一个完整周期
-    float time_seconds = (float)samples / SAMPLE_RATE;
-    results.frequency[0] = (zero_crossings[0] / 2) / time_seconds;
-    results.frequency[1] = (zero_crossings[1] / 2) / time_seconds;
 
     return results;
 }
