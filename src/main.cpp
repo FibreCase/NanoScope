@@ -1,10 +1,8 @@
 #include "Arduino.h"
+#include "BluetoothSerial.h"
 #include "TFT_eSPI.h"
 
 #define DEV_DEBUG_FLAG 1
-
-#define DAC_B_PIN 25
-#define DAV_A_PIN 26
 
 #define CHANNELS 2
 
@@ -14,33 +12,34 @@ struct ChannelData {
     float frequency[CHANNELS];
 };
 
-ChannelData calulateResults = { { 0, 0 }, { 0, 0 }, { 0.0f, 0.0f } };
-
-void showInfo(ChannelData results);
-ChannelData calculateInfo(uint8_t* data);
-
 HardwareSerial dataSerial(1);
+BluetoothSerial SerialBT;
 TFT_eSPI tft = TFT_eSPI();
 
-SemaphoreHandle_t fsm_mutex;
+SemaphoreHandle_t serial_fsm_mutex;
+SemaphoreHandle_t bt_fsm_mutex;
 SemaphoreHandle_t tft_mutex;
 SemaphoreHandle_t freq_mutex;
+SemaphoreHandle_t wave_set_mutex;
 EventGroupHandle_t data_ready_event_group;
 
-#define TASK1_EVENT_BIT (1 << 0)
-#define TASK2_EVENT_BIT (1 << 0)
-
-void drawWave(uint8_t* data, size_t len, int y_range, int x_offset, int y_offset);
+#define TASK_TFT_WAVE_EVENT_BIT (1 << 0)
+#define TASK_TFT_INFO_EVENT_BIT (1 << 1)
+#define TASK_WAVE_SET_EVENT_BIT (1 << 2)
 
 void taskWaveRefresh(void* arg);
 void taskInfoRefresh(void* arg);
+void taskWaveSet(void* arg);
 void serialRecvTask(void* arg);
+void taskBluetoothRecv(void* arg);
 
 void setup()
 {
-    fsm_mutex = xSemaphoreCreateMutex();
+    serial_fsm_mutex = xSemaphoreCreateMutex();
+    bt_fsm_mutex = xSemaphoreCreateMutex();
     tft_mutex = xSemaphoreCreateMutex();
     freq_mutex = xSemaphoreCreateMutex();
+    wave_set_mutex = xSemaphoreCreateMutex();
     data_ready_event_group = xEventGroupCreate();
 
     pinMode(2, OUTPUT);
@@ -51,6 +50,7 @@ void setup()
 
     Serial.begin(921600);
     dataSerial.begin(921600, SERIAL_8N1, 16, 17);
+    SerialBT.begin("Fibre_ESP32_OSC");
 
     tft.begin();
     tft.setRotation(1);
@@ -67,9 +67,11 @@ void setup()
     dataSerial.flush(false);
     Serial.flush(false);
 
-    xTaskCreate(taskWaveRefresh, "TftRefresh", 4096, NULL, 2, NULL);
-    xTaskCreate(taskInfoRefresh, "InfoRefresh", 4096, NULL, 2, NULL);
+    xTaskCreate(taskWaveRefresh, "TftRefresh", 4096, NULL, 3, NULL);
+    xTaskCreate(taskInfoRefresh, "InfoRefresh", 4096, NULL, 3, NULL);
+    xTaskCreate(taskWaveSet, "WaveSet", 4096, NULL, 3, NULL);
     xTaskCreate(serialRecvTask, "SerialRecv", 4096, NULL, 1, NULL);
+    xTaskCreate(taskBluetoothRecv, "BluetoothRecv", 4096, NULL, 2, NULL);
 
     Serial.println("ESP32 Started - Ready to receive data");
     digitalWrite(2, HIGH);
@@ -77,10 +79,16 @@ void setup()
 
 void loop()
 {
+    SerialBT.write(0xF0);
+    vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
+/**
+ * 串口接收状态机
+ */
+
 static uint8_t cur_buf[1000];
-void fsm(uint8_t buf);
+void serial_fsm(uint8_t buf);
 
 #define SERIAL_FSM_IDLE 1
 #define SERIAL_FSM_HEADER 2
@@ -117,15 +125,15 @@ void serialRecvTask(void* arg)
 
         size_t bytesRead = dataSerial.readBytes(cur_buf, sizeof(cur_buf));
         for (size_t i = 0; i < bytesRead; i++) {
-            if (xSemaphoreTake(fsm_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-                fsm(cur_buf[i]);
-                xSemaphoreGive(fsm_mutex);
+            if (xSemaphoreTake(serial_fsm_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                serial_fsm(cur_buf[i]);
+                xSemaphoreGive(serial_fsm_mutex);
             }
         }
     }
 }
 
-void fsm(uint8_t buf)
+void serial_fsm(uint8_t buf)
 {
     switch (status) {
     case SERIAL_FSM_IDLE:
@@ -167,9 +175,7 @@ void fsm(uint8_t buf)
     case SERIAL_FSM_ADC_DATA:
         recv_adc_buf[recv_adc_index++] = buf;
         if (recv_adc_index >= RECV_ADC_DATA_SIZE) {
-            if (DEV_DEBUG_FLAG)
-                // Serial.printf("Frame %d | %d | %d | %d | %d\n", recv_count++, ((uint32_t*)recv_freq_buf)[0], ((uint32_t*)recv_freq_buf)[1], ((uint16_t*)recv_adc_buf)[0], ((uint16_t*)recv_adc_buf)[1]);
-                xEventGroupSetBits(data_ready_event_group, TASK1_EVENT_BIT | TASK2_EVENT_BIT);
+            xEventGroupSetBits(data_ready_event_group, TASK_TFT_WAVE_EVENT_BIT | TASK_TFT_INFO_EVENT_BIT);
             status = SERIAL_FSM_IDLE;
             error_count = 0;
         }
@@ -186,21 +192,115 @@ void fsm(uint8_t buf)
     }
 }
 
-int waveXRange = 4000; // 200 - 8000 4000测249khz
-int waveYRange = 128; // 16 - 1024
-int waveXOffset = 0; // 0 - 8000 / waveXRange
-int waveYOffset = 0; // 
+/**
+ * 蓝牙接收状态机
+ */
+
+void bt_fsm(uint8_t buf);
+
+void taskBluetoothRecv(void* arg)
+{
+    uint8_t buf[64];
+    while (1) {
+        int len = SerialBT.available();
+        if (len > 0) {
+            int readLen = SerialBT.readBytes(buf, sizeof(buf));
+            for (int i = 0; i < readLen; ++i) {
+                if (xSemaphoreTake(bt_fsm_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                    bt_fsm(buf[i]);
+                    xSemaphoreGive(bt_fsm_mutex);
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+#define BT_RECV_ID_X_RANGE 0x01
+#define BT_RECV_ID_Y_RANGE 0x02
+#define BT_RECV_ID_X_OFFSET 0x03
+#define BT_RECV_ID_Y_OFFSET 0x04
+
+#define BT_FSM_IDLE 1
+#define BT_FSM_HEADER 2
+#define BT_FSM_ID 3
+#define BT_FSM_DATA 4
+
+uint8_t bt_recv_id = 0;
+uint8_t bt_recv_count = 0;
+uint8_t bt_recv_buf[4] = { 0 };
+uint8_t bt_status = BT_FSM_IDLE;
+
+void bt_fsm(uint8_t buf)
+{
+    switch (bt_status) {
+    case BT_FSM_IDLE:
+        if (buf == 0xFF) {
+            bt_status = BT_FSM_HEADER;
+        } else {
+            if (DEV_DEBUG_FLAG)
+                Serial.printf("BT Header Not Found ( 0x%02X )\n", buf);
+        }
+        break;
+
+    case BT_FSM_HEADER:
+        if (buf == 0xFE) {
+            bt_status = BT_FSM_ID;
+        } else {
+            if (DEV_DEBUG_FLAG)
+                Serial.printf("BT Header Error ( 0x%02X )\n", buf);
+            bt_status = BT_FSM_IDLE;
+        }
+        break;
+
+    case BT_FSM_ID:
+        if (buf == BT_RECV_ID_X_RANGE || buf == BT_RECV_ID_Y_RANGE || buf == BT_RECV_ID_X_OFFSET || buf == BT_RECV_ID_Y_OFFSET) {
+            bt_recv_id = buf;
+            bt_recv_count = 0;
+            bt_status = BT_FSM_DATA;
+        } else {
+            if (DEV_DEBUG_FLAG)
+                Serial.printf("BT ID Error ( 0x%02X )\n", buf);
+            bt_status = BT_FSM_IDLE;
+        }
+        break;
+
+    case BT_FSM_DATA:
+        bt_recv_buf[bt_recv_count++] = buf;
+        if (bt_recv_count >= 4) {
+            bt_recv_count = 0;
+            bt_status = BT_FSM_IDLE;
+            xEventGroupSetBits(data_ready_event_group, TASK_WAVE_SET_EVENT_BIT);
+        }
+        break;
+    }
+}
+
+/**
+ * 绘制波形
+ */
+
+uint32_t wave_x_range = 8000; // 960 - 8000
+uint32_t wave_y_range = 128; // 16 - 1024
+uint32_t wave_x_offset = 0;
+uint32_t wave_y_offset = 0;
+uint32_t is_high_voltage = 0; // 是否高电压
+
+void drawWave(uint8_t* data, size_t len, int y_range, int x_offset, int y_offset);
 
 void taskWaveRefresh(void* arg)
 {
     for (;;) {
-        xEventGroupWaitBits(data_ready_event_group, TASK1_EVENT_BIT, pdTRUE, pdFALSE, portMAX_DELAY);
-        if (xSemaphoreTake(tft_mutex, portMAX_DELAY) == pdTRUE) {
-            {
-                drawWave(recv_adc_buf, waveXRange, waveYRange, waveXOffset, waveYOffset);
+        xEventGroupWaitBits(data_ready_event_group, TASK_TFT_WAVE_EVENT_BIT, pdTRUE, pdFALSE, portMAX_DELAY);
+        if (xSemaphoreTake(wave_set_mutex, portMAX_DELAY) == pdTRUE) {
+            if (xSemaphoreTake(tft_mutex, portMAX_DELAY) == pdTRUE) {
+                {
+                    drawWave(recv_adc_buf, (size_t)wave_x_range, (int)wave_y_range, (int)wave_x_offset, (int)wave_y_offset);
+                }
+                xSemaphoreGive(tft_mutex);
             }
-            xSemaphoreGive(tft_mutex);
         }
+        xSemaphoreGive(wave_set_mutex);
     }
 }
 
@@ -219,7 +319,7 @@ void drawWave(uint8_t* data, size_t len, int y_range, int x_offset, int y_offset
 
     for (int x = 0; x < screen_w; x++) {
         // 1. 垂直擦除整列
-        tft.drawFastVLine(x, 0, screen_h, TFT_BLACK);
+        tft.drawFastVLine(x, 0, screen_h, x % 40 && x != 239 ? TFT_BLACK : TFT_DARKGREY);
 
         // 2. 区间数据平均
         int start_idx = round(x * bin_size);
@@ -259,27 +359,45 @@ void drawWave(uint8_t* data, size_t len, int y_range, int x_offset, int y_offset
         prev_y_ch1 = y_ch1;
         prev_y_ch2 = y_ch2;
     }
+
+    for (uint8_t i = 0; i < 5; i++)
+    {
+        tft.drawFastHLine(0, i * 32, screen_w, TFT_DARKGREY);
+    }
+    
 }
+
+/**
+ * 信息刷新
+ */
+
+#define DAV_A_PIN 26
+#define DAC_B_PIN 25
+
+ChannelData calculateResults = { { 0, 0 }, { 0, 0 }, { 0.0f, 0.0f } };
+ChannelData calculateInfo(uint8_t* data);
+void showInfo(ChannelData results);
 
 void taskInfoRefresh(void* arg)
 {
     for (;;) {
-        xEventGroupWaitBits(data_ready_event_group, TASK2_EVENT_BIT, pdTRUE, pdFALSE, portMAX_DELAY);
-        calulateResults = calculateInfo(recv_adc_buf);
-        calulateResults.frequency[0] = ((uint32_t*)recv_freq_buf)[0] / 1000.0f;
-        calulateResults.frequency[1] = ((uint32_t*)recv_freq_buf)[1] / 1000.0f;
-        // dacWrite(DAV_A_PIN, (calulateResults.vmean[0] + calulateResults.vpp[0] * 0.4) / 16);
-        // dacWrite(DAC_B_PIN, (calulateResults.vmean[1] + calulateResults.vpp[1] * 0.4) / 16);
-        dacWrite(DAV_A_PIN, (calulateResults.vmean[0] + calulateResults.vpp[0] * 0.4) / 16);
-        dacWrite(DAC_B_PIN, (calulateResults.vmean[1] + calulateResults.vpp[1] * 0.4) / 16);
-        Serial.printf("Frame %d | CH1: %d , %2.2f , %d | CH2: %d , %2.2f , %d\n",
-            recv_count++, calulateResults.vpp[0], calulateResults.vmean[0] * 3.3 / 4096, ((uint32_t*)recv_freq_buf)[0],
-            calulateResults.vpp[1], calulateResults.vmean[1] * 3.3 / 4096, ((uint32_t*)recv_freq_buf)[1]);
-        if (xSemaphoreTake(tft_mutex, portMAX_DELAY) == pdTRUE) {
-            {
-                showInfo(calulateResults);
+        xEventGroupWaitBits(data_ready_event_group, TASK_TFT_INFO_EVENT_BIT, pdTRUE, pdFALSE, portMAX_DELAY);
+        calculateResults = calculateInfo(recv_adc_buf);
+        calculateResults.frequency[0] = ((uint32_t*)recv_freq_buf)[0] / 1000.0f;
+        calculateResults.frequency[1] = ((uint32_t*)recv_freq_buf)[1] / 1000.0f;
+        dacWrite(DAV_A_PIN, calculateResults.vpp[0] > 250 ? (calculateResults.vmean[0] / 16) : 255); // 剔除Vpp小于0.2V的信号频率
+        dacWrite(DAC_B_PIN, calculateResults.vpp[1] > 250 ? (calculateResults.vmean[1] / 16) : 255);
+        Serial.printf("Frame %3d | CH1: %d , %2.2f , %d | CH2: %d , %2.2f , %d\n",
+            recv_count++, calculateResults.vpp[0], calculateResults.vmean[0] * 3.3 / 4096, ((uint32_t*)recv_freq_buf)[0],
+            calculateResults.vpp[1], calculateResults.vmean[1] * 3.3 / 4096, ((uint32_t*)recv_freq_buf)[1]);
+        if (xSemaphoreTake(wave_set_mutex, portMAX_DELAY) == pdTRUE) {
+            if (xSemaphoreTake(tft_mutex, portMAX_DELAY) == pdTRUE) {
+                {
+                    showInfo(calculateResults);
+                }
+                xSemaphoreGive(tft_mutex);
             }
-            xSemaphoreGive(tft_mutex);
+            xSemaphoreGive(wave_set_mutex);
         }
     }
 }
@@ -288,12 +406,22 @@ void showInfo(ChannelData results)
 {
     tft.setCursor(0, 156);
     tft.setTextFont(2);
-    tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.printf("CH1 %4.1f Vpp, %8.2f kHz   \n", calulateResults.vpp[0] * 3.3 / 4096, calulateResults.frequency[0]);
-    tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.printf("CH2 %4.1f Vpp, %8.2f kHz   \n", calulateResults.vpp[1] * 3.3 / 4096, calulateResults.frequency[1]);
+
+    if (is_high_voltage) {
+        tft.setTextColor(TFT_GREEN, TFT_BLACK);
+        tft.printf("CH1 %4.2f Vpp | %4.2f Vmean \n    %8.3f kHz \n", calculateResults.vpp[0] * 10 / 4096 - 2.5, calculateResults.vmean[0] * 10 / 4096 - 2.5, calculateResults.frequency[0]);
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        tft.printf("CH2 %4.2f Vpp | %4.2f Vmean \n    %8.3f kHz \n", calculateResults.vpp[1] * 10 / 4096 - 2.5, calculateResults.vmean[1] * 10 / 4096 - 2.5, calculateResults.frequency[1]);
+
+    } else {
+        tft.setTextColor(TFT_GREEN, TFT_BLACK);
+        tft.printf("CH1 %4.2f Vpp | %4.2f Vmean \n    %8.3f kHz \n", calculateResults.vpp[0] * 3.3 / 4096, calculateResults.vmean[0] * 3.3 / 4096, calculateResults.frequency[0]);
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        tft.printf("CH2 %4.2f Vpp | %4.2f Vmean \n    %8.3f kHz \n", calculateResults.vpp[1] * 3.3 / 4096, calculateResults.vmean[1] * 3.3 / 4096, calculateResults.frequency[1]);
+    }
+
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.printf("Frame %d \n", recv_count);
+    tft.printf("%c %3d %4d  %4d %4d %4d \n", is_high_voltage ? 'H' : 'L', recv_count, wave_x_range, wave_y_range, wave_x_offset, wave_y_offset);
 }
 
 ChannelData calculateInfo(uint8_t* data)
@@ -329,4 +457,53 @@ ChannelData calculateInfo(uint8_t* data)
     results.vmean[1] = (max_ch2 + min_ch2) / 2;
 
     return results;
+}
+
+/**
+ * 更新波形范围和偏移量
+ */
+
+void updateWaveRange(uint8_t id, uint32_t value);
+
+void taskWaveSet(void* arg)
+{
+    for (;;) {
+        xEventGroupWaitBits(data_ready_event_group, TASK_WAVE_SET_EVENT_BIT, pdTRUE, pdFALSE, portMAX_DELAY);
+        SerialBT.write(0xFA);
+        if (xSemaphoreTake(wave_set_mutex, portMAX_DELAY) == pdTRUE) {
+            updateWaveRange(bt_recv_id, ((uint32_t*)bt_recv_buf)[0]);
+            xSemaphoreGive(wave_set_mutex);
+        }
+    }
+}
+
+#define WAVE_X_RANGE_MIN 960
+#define WAVE_X_RANGE_MAX 8000
+#define WAVE_Y_RANGE_MIN 16
+#define WAVE_Y_RANGE_MAX 1024
+#define WAVE_X_OFFSET_MIN 0
+#define WAVE_X_OFFSET_MAX 8000 - 960
+#define WAVE_Y_OFFSET_MIN 0
+#define WAVE_Y_OFFSET_MAX 1024
+
+void updateWaveRange(uint8_t id, uint32_t value)
+{
+    switch (id) {
+    case BT_RECV_ID_X_RANGE:
+        wave_x_range = constrain(value, WAVE_X_RANGE_MIN, WAVE_X_RANGE_MAX);
+        break;
+    case BT_RECV_ID_Y_RANGE:
+        wave_y_range = constrain(value, WAVE_Y_RANGE_MIN, WAVE_Y_RANGE_MAX);
+        break;
+    case BT_RECV_ID_X_OFFSET:
+        wave_x_offset = constrain(value, WAVE_X_OFFSET_MIN, WAVE_X_OFFSET_MAX);
+        break;
+    case BT_RECV_ID_Y_OFFSET:
+        wave_y_offset = constrain(value, WAVE_Y_OFFSET_MIN, WAVE_Y_OFFSET_MAX);
+        break;
+    default:
+        if (DEV_DEBUG_FLAG)
+            Serial.printf("[ERROR] Wave Set Unknown ID: %d\n", id);
+        break;
+    }
 }
