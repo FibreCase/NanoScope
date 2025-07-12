@@ -55,6 +55,7 @@ void setup()
     tft.begin();
     tft.setRotation(1);
     tft.fillScreen(TFT_BLACK);
+    tft.setTextWrap(false);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.setTextFont(4);
 
@@ -351,8 +352,8 @@ void drawWave(uint8_t* data, size_t len, int y_range, int x_offset, int y_offset
         int avg_ch1 = sum_ch1 / count;
         int avg_ch2 = sum_ch2 / count;
 
-        int y_ch1 = screen_h - (avg_ch1 * y_range / adc_max + y_offset);
-        int y_ch2 = screen_h - (avg_ch2 * y_range / adc_max + y_offset);
+        int y_ch1 = screen_h - (avg_ch1 * y_range / adc_max - y_offset);
+        int y_ch2 = screen_h - (avg_ch2 * y_range / adc_max - y_offset);
 
         y_ch1 = constrain(y_ch1, 0, screen_h - 1);
         y_ch2 = constrain(y_ch2, 0, screen_h - 1);
@@ -390,8 +391,8 @@ void taskInfoRefresh(void* arg)
         calculateResults = calculateInfo(recv_adc_buf);
         calculateResults.frequency[0] = ((uint32_t*)recv_freq_buf)[0] / 1000.0f;
         calculateResults.frequency[1] = ((uint32_t*)recv_freq_buf)[1] / 1000.0f;
-        dacWrite(DAV_A_PIN, calculateResults.vpp[0] > 250 ? (calculateResults.vmean[0] / 16) : 255); // 剔除Vpp小于0.2V的信号频率
-        dacWrite(DAC_B_PIN, calculateResults.vpp[1] > 250 ? (calculateResults.vmean[1] / 16) : 255);
+        dacWrite(DAV_A_PIN, calculateResults.vpp[0] > 250 ? (calculateResults.vmean[0] / 16) : 200); // 剔除Vpp小于0.2V的信号频率
+        dacWrite(DAC_B_PIN, calculateResults.vpp[1] > 250 ? (calculateResults.vmean[1] / 16) : 200);
         Serial.printf("Frame %3d | CH1: %d , %2.2f , %d | CH2: %d , %2.2f , %d\n",
             recv_count++, calculateResults.vpp[0], calculateResults.vmean[0] * 3.3 / 4096, ((uint32_t*)recv_freq_buf)[0],
             calculateResults.vpp[1], calculateResults.vmean[1] * 3.3 / 4096, ((uint32_t*)recv_freq_buf)[1]);
@@ -414,7 +415,7 @@ void showInfo(ChannelData results)
     tft.setTextFont(2);
 
     // 显示波形范围和偏移量 130 - 146
-    axis_info[0] = String(is_high_voltage ? wave_y_offset * 10.0 / wave_y_range : wave_y_offset * 3.3 / wave_y_range, 2) + " V";
+    axis_info[0] = String(is_high_voltage ? wave_y_offset * 7.5 / wave_y_range - 2.5 : wave_y_offset * 3.3 / wave_y_range, 2) + " V";
     axis_info[1] = String(wave_x_range / (500.0 * 6), 2) + " ms/div | " + String(is_high_voltage ? 10.0 * 128 / (wave_y_range * 4) : 3.3 * 128 / (wave_y_range * 4), 2) + " V/div\n";
 
     tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
@@ -428,15 +429,15 @@ void showInfo(ChannelData results)
     tft.setCursor(0, 174);
     if (is_high_voltage) {
         tft.setTextColor(TFT_GREEN, TFT_BLACK);
-        tft.printf("%4.2f Vpp | %4.2f Vmean | %7.3f kHz\n", calculateResults.vpp[0] * 10 / 4096 - 2.5, calculateResults.vmean[0] * 3.3 / 4096, calculateResults.frequency[0]);
+        tft.printf("%4.2f Vpp | %4.2f Vmean | %7.3f kHz  \n", calculateResults.vpp[0] * 7.5 / 4096, calculateResults.vmean[0] * 7.5 / 4096 - 2.5, calculateResults.frequency[0]);
         tft.setTextColor(TFT_RED, TFT_BLACK);
-        tft.printf("%4.2f Vpp | %4.2f Vmean | %7.3f kHz\n", calculateResults.vpp[1] * 10 / 4096 - 2.5, calculateResults.vmean[1] * 3.3 / 4096, calculateResults.frequency[1]);
+        tft.printf("%4.2f Vpp | %4.2f Vmean | %7.3f kHz  \n", calculateResults.vpp[1] * 7.5 / 4096, calculateResults.vmean[1] * 7.5 / 4096 - 2.5, calculateResults.frequency[1]);
 
     } else {
         tft.setTextColor(TFT_GREEN, TFT_BLACK);
-        tft.printf("%4.2f Vpp | %4.2f Vmean | %7.3f kHz\n", calculateResults.vpp[0] * 3.3 / 4096, calculateResults.vmean[0] * 3.3 / 4096, calculateResults.frequency[0]);
+        tft.printf("%4.2f Vpp | %4.2f Vmean | %7.3f kHz  \n", calculateResults.vpp[0] * 3.3 / 4096, calculateResults.vmean[0] * 3.3 / 4096, calculateResults.frequency[0]);
         tft.setTextColor(TFT_RED, TFT_BLACK);
-        tft.printf("%4.2f Vpp | %4.2f Vmean | %7.3f kHz\n", calculateResults.vpp[1] * 3.3 / 4096, calculateResults.vmean[1] * 3.3 / 4096, calculateResults.frequency[1]);
+        tft.printf("%4.2f Vpp | %4.2f Vmean | %7.3f kHz  \n", calculateResults.vpp[1] * 3.3 / 4096, calculateResults.vmean[1] * 3.3 / 4096, calculateResults.frequency[1]);
     }
     tft.setTextColor(TFT_YELLOW, TFT_BLACK);
     tft.printf("Phase Diff: 179.3° \n");
@@ -500,7 +501,7 @@ void taskWaveSet(void* arg)
     }
 }
 
-#define WAVE_X_RANGE_MIN 960
+#define WAVE_X_RANGE_MIN 1
 #define WAVE_X_RANGE_MAX 8000
 #define WAVE_Y_RANGE_MIN 16
 #define WAVE_Y_RANGE_MAX 1024
