@@ -58,11 +58,17 @@ void setup()
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.setTextFont(4);
 
-    tft.setCursor(0, 130);
+    tft.setCursor(0, 122);
+    tft.println("FibreCase 2025");
     tft.println("Simple Oscilloscope");
+    tft.println("Loading...");
 
     digitalWrite(2, LOW);
-    delay(2000);
+    delay(1000);
+
+    // 清理屏幕 y 0 - 146, 176 - 240
+    tft.fillRect(0, 0, 240, 146, TFT_BLACK);
+    tft.fillRect(0, 174, 240, 66, TFT_BLACK);
 
     dataSerial.flush(false);
     Serial.flush(false);
@@ -220,6 +226,7 @@ void taskBluetoothRecv(void* arg)
 #define BT_RECV_ID_Y_RANGE 0x02
 #define BT_RECV_ID_X_OFFSET 0x03
 #define BT_RECV_ID_Y_OFFSET 0x04
+#define BT_RECV_ID_VOLTAGE 0x05
 
 #define BT_FSM_IDLE 1
 #define BT_FSM_HEADER 2
@@ -254,7 +261,7 @@ void bt_fsm(uint8_t buf)
         break;
 
     case BT_FSM_ID:
-        if (buf == BT_RECV_ID_X_RANGE || buf == BT_RECV_ID_Y_RANGE || buf == BT_RECV_ID_X_OFFSET || buf == BT_RECV_ID_Y_OFFSET) {
+        if (buf == BT_RECV_ID_X_RANGE || buf == BT_RECV_ID_Y_RANGE || buf == BT_RECV_ID_X_OFFSET || buf == BT_RECV_ID_Y_OFFSET || buf == BT_RECV_ID_VOLTAGE) {
             bt_recv_id = buf;
             bt_recv_count = 0;
             bt_status = BT_FSM_DATA;
@@ -360,11 +367,9 @@ void drawWave(uint8_t* data, size_t len, int y_range, int x_offset, int y_offset
         prev_y_ch2 = y_ch2;
     }
 
-    for (uint8_t i = 0; i < 5; i++)
-    {
+    for (uint8_t i = 0; i < 5; i++) {
         tft.drawFastHLine(0, i * 32, screen_w, TFT_DARKGREY);
     }
-    
 }
 
 /**
@@ -402,26 +407,44 @@ void taskInfoRefresh(void* arg)
     }
 }
 
+String axis_info[2];
+
 void showInfo(ChannelData results)
 {
-    tft.setCursor(0, 156);
     tft.setTextFont(2);
 
+    // 显示波形范围和偏移量 130 - 146
+    axis_info[0] = String(is_high_voltage ? wave_y_offset * 10.0 / wave_y_range : wave_y_offset * 3.3 / wave_y_range, 2) + " V";
+    axis_info[1] = String(wave_x_range / (500.0 * 6), 2) + " ms/div | " + String(is_high_voltage ? 10.0 * 128 / (wave_y_range * 4) : 3.3 * 128 / (wave_y_range * 4), 2) + " V/div\n";
+
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.setCursor(0, 130);
+    tft.print(axis_info[0]);
+    tft.setCursor(239 - tft.textWidth(axis_info[1]), 130);
+    tft.print(axis_info[1]);
+
+    // 显示名称 148 - 174
+    // 显示通道信息 174 - 222
+    tft.setCursor(0, 174);
     if (is_high_voltage) {
         tft.setTextColor(TFT_GREEN, TFT_BLACK);
-        tft.printf("CH1 %4.2f Vpp | %4.2f Vmean \n    %8.3f kHz \n", calculateResults.vpp[0] * 10 / 4096 - 2.5, calculateResults.vmean[0] * 10 / 4096 - 2.5, calculateResults.frequency[0]);
+        tft.printf("%4.2f Vpp | %4.2f Vmean | %7.3f kHz\n", calculateResults.vpp[0] * 10 / 4096 - 2.5, calculateResults.vmean[0] * 3.3 / 4096, calculateResults.frequency[0]);
         tft.setTextColor(TFT_RED, TFT_BLACK);
-        tft.printf("CH2 %4.2f Vpp | %4.2f Vmean \n    %8.3f kHz \n", calculateResults.vpp[1] * 10 / 4096 - 2.5, calculateResults.vmean[1] * 10 / 4096 - 2.5, calculateResults.frequency[1]);
+        tft.printf("%4.2f Vpp | %4.2f Vmean | %7.3f kHz\n", calculateResults.vpp[1] * 10 / 4096 - 2.5, calculateResults.vmean[1] * 3.3 / 4096, calculateResults.frequency[1]);
 
     } else {
         tft.setTextColor(TFT_GREEN, TFT_BLACK);
-        tft.printf("CH1 %4.2f Vpp | %4.2f Vmean \n    %8.3f kHz \n", calculateResults.vpp[0] * 3.3 / 4096, calculateResults.vmean[0] * 3.3 / 4096, calculateResults.frequency[0]);
+        tft.printf("%4.2f Vpp | %4.2f Vmean | %7.3f kHz\n", calculateResults.vpp[0] * 3.3 / 4096, calculateResults.vmean[0] * 3.3 / 4096, calculateResults.frequency[0]);
         tft.setTextColor(TFT_RED, TFT_BLACK);
-        tft.printf("CH2 %4.2f Vpp | %4.2f Vmean \n    %8.3f kHz \n", calculateResults.vpp[1] * 3.3 / 4096, calculateResults.vmean[1] * 3.3 / 4096, calculateResults.frequency[1]);
+        tft.printf("%4.2f Vpp | %4.2f Vmean | %7.3f kHz\n", calculateResults.vpp[1] * 3.3 / 4096, calculateResults.vmean[1] * 3.3 / 4096, calculateResults.frequency[1]);
     }
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.printf("Phase Diff: 179.3° \n");
 
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.printf("%c %3d %4d  %4d %4d %4d \n", is_high_voltage ? 'H' : 'L', recv_count, wave_x_range, wave_y_range, wave_x_offset, wave_y_offset);
+    // 显示其他信息
+    tft.setCursor(0, 224);
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.printf("Mode %c | Frame %3d \n", is_high_voltage ? 'H' : 'L', recv_count);
 }
 
 ChannelData calculateInfo(uint8_t* data)
@@ -500,6 +523,9 @@ void updateWaveRange(uint8_t id, uint32_t value)
         break;
     case BT_RECV_ID_Y_OFFSET:
         wave_y_offset = constrain(value, WAVE_Y_OFFSET_MIN, WAVE_Y_OFFSET_MAX);
+        break;
+    case BT_RECV_ID_VOLTAGE:
+        is_high_voltage = (value == 1) ? 1 : 0;
         break;
     default:
         if (DEV_DEBUG_FLAG)
