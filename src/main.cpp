@@ -376,8 +376,8 @@ void drawWave(uint8_t* data, size_t len, int y_range, int x_offset, int y_offset
  * 信息刷新
  */
 
-#define DAV_A_PIN 26
-#define DAC_B_PIN 25
+#define DAV_A_PIN 25
+#define DAC_B_PIN 26
 
 ChannelData calculateResults = { { 0, 0 }, { 0, 0 }, { 0.0f, 0.0f } };
 ChannelData calculateInfo(uint8_t* data);
