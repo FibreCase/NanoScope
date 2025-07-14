@@ -14,18 +14,16 @@ void setup()
 
     Serial.setRxBufferSize(8000);
     Serial.begin(921600);
+    Serial.flush(false);
 
     digitalWrite(2, LOW);
-    delay(1000);
 
-    Serial.flush(false);
+    taskDataSerialRecvInit();
+    taskTftInit();
+    taskBluetoothRecvInit();
 
     Serial.println("ESP32 Started - Ready to receive data");
     digitalWrite(2, HIGH);
-
-    taskBluetoothRecvInit();
-    taskDataSerialRecvInit();
-    taskTftInit();
 }
 
 void loop()

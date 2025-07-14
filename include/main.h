@@ -1,4 +1,5 @@
 #define CHANNELS 2
+
 #define DEV_DEBUG_FLAG 1
 #define LED_PIN 2
 
@@ -10,8 +11,4 @@
 
 extern EventGroupHandle_t data_ready_event_group;
 
-struct ChannelData {
-    uint16_t vpp[CHANNELS];
-    uint16_t vmean[CHANNELS];
-    float frequency[CHANNELS];
-};
+

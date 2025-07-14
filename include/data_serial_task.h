@@ -27,3 +27,5 @@ extern HardwareSerial dataSerial;
 
 void taskDataSerialRecvInit();
 void taskDataSerialRecv(void* arg);
+
+void serialFsm(uint8_t buf);
