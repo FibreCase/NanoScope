@@ -28,10 +28,11 @@ void taskDataSerialRecvInit()
     serial_fsm_mutex = xSemaphoreCreateMutex();
     adc_recv_mutex = xSemaphoreCreateMutex();
     freq_recv_mutex = xSemaphoreCreateMutex();
-    dataSerial.setRxBufferSize(8020);
+    dataSerial.setRxBufferSize(16384);
+
     dataSerial.begin(SERIAL_BAUD_RATE, SERIAL_MODE, SERIAL_RX_PIN, SERIAL_TX_PIN);
     dataSerial.flush(false);
-    xTaskCreate(taskDataSerialRecv, "DataSerialRecv", 4096, NULL, 1, NULL);
+    xTaskCreatePinnedToCore(taskDataSerialRecv, "DataSerialRecv", 4096, NULL, 5, NULL, 1);
 }
 
 void dataSerialFsm(uint8_t buf)
@@ -44,8 +45,8 @@ void dataSerialFsm(uint8_t buf)
         } else {
             error_count++;
             if (error_count >= 100) { // 每100个错误字节输出一次
-                if (DEV_DEBUG_FLAG)
-                    Serial.printf("Header Not Found ( 0x%02X, %d times )\n", buf, error_count);
+                // if (DEV_DEBUG_FLAG)
+                //     Serial.printf("Header Not Found ( 0x%02X, %d times )\n", buf, error_count);
                 error_count = 0;
             }
         }

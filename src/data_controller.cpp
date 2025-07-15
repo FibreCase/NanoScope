@@ -128,133 +128,151 @@ WaveSettings updateWaveSettings(uint8_t id, uint32_t value, WaveSettings wave_se
     return wave_settings;
 }
 
-#include <stdint.h>
-#include <stdlib.h>
-#include <math.h>
+// #include <math.h>
+// #include <stdint.h>
+// #include <stdlib.h>
 
-#define CHANNEL_SAMPLE_COUNT 2000  // 每个通道的采样点数
-#define MAX_LAG 200                // 最大允许的互相关滞后
+// #define CHANNEL_SAMPLE_COUNT 2000 // 每个通道的采样点数
+// #define MAX_LAG 200 // 最大允许的互相关滞后
 
-int16_t ch1[CHANNEL_SAMPLE_COUNT];
-int16_t ch2[CHANNEL_SAMPLE_COUNT];
+// int16_t ch1[CHANNEL_SAMPLE_COUNT];
+// int16_t ch2[CHANNEL_SAMPLE_COUNT];
 
-float calculatePhaseDiff(uint8_t* data, uint32_t sample_rate, float freq) {
-    const uint16_t* adc16 = (const uint16_t*)data;
-
-    // 分离两个通道，并去直流分量（假设你已解决内存分配，使用全局/静态变量等）
-    int16_t ch1[CHANNEL_SAMPLE_COUNT];
-    int16_t ch2[CHANNEL_SAMPLE_COUNT];
-    int32_t sum1 = 0, sum2 = 0;
-
-    for (int i = 0; i < CHANNEL_SAMPLE_COUNT; i++) {
-        ch1[i] = adc16[2 * i];       // 通道 1 在偶数索引
-        ch2[i] = adc16[2 * i + 1];   // 通道 2 在奇数索引
-        sum1 += ch1[i];
-        sum2 += ch2[i];
-    }
-
-    int16_t mean1 = sum1 / CHANNEL_SAMPLE_COUNT;
-    int16_t mean2 = sum2 / CHANNEL_SAMPLE_COUNT;
-
-    for (int i = 0; i < CHANNEL_SAMPLE_COUNT; i++) {
-        ch1[i] -= mean1;
-        ch2[i] -= mean2;
-    }
-
-    // 互相关计算
-    int best_lag = 0;
-    int64_t max_corr = INT64_MIN;
-
-    for (int lag = -MAX_LAG; lag <= MAX_LAG; lag++) {
-        int64_t corr = 0;
-        for (int i = 0; i < CHANNEL_SAMPLE_COUNT; i++) {
-            int j = i + lag;
-            if (j >= 0 && j < CHANNEL_SAMPLE_COUNT) {
-                corr += (int32_t)ch1[i] * (int32_t)ch2[j];
-            }
-        }
-
-        if (corr > max_corr) {
-            max_corr = corr;
-            best_lag = lag;
-        }
-
-        vTaskDelay(0);
-    }
-
-    // 将 kHz 转换为 Hz，计算一个周期内的采样点数
-    float samples_per_period = (float)sample_rate / (freq * 1000.0f);
-
-    // 相位差（单位：度）
-    float phase_deg = ((float)best_lag / samples_per_period) * 360.0f;
-
-    // 归一化到 [-180°, 180°]
-    if (phase_deg < 0) {
-        phase_deg += 180.0f;
-    }
-    if (phase_deg > 180.0f) {
-        phase_deg = phase_deg - 360.0f;
-    }
-
-    return phase_deg;
-}
-
-// volatile uint32_t _ch1_time = 0;
-// volatile uint32_t _ch2_time = 0;
-// volatile bool _ch1_captured = false;
-// volatile bool _ch2_captured = false;
-
-// void IRAM_ATTR _isr_ch1()
+// float calculatePhaseDiff(uint8_t* data, uint32_t sample_rate, float freq)
 // {
-//     _ch1_time = micros();
-//     _ch1_captured = true;
-// }
+//     const uint16_t* adc16 = (const uint16_t*)data;
 
-// void IRAM_ATTR _isr_ch2()
-// {
-//     _ch2_time = micros();
-//     _ch2_captured = true;
-// }
+//     // 分离两个通道，并去直流分量（假设你已解决内存分配，使用全局/静态变量等）
+//     int16_t ch1[CHANNEL_SAMPLE_COUNT];
+//     int16_t ch2[CHANNEL_SAMPLE_COUNT];
+//     int32_t sum1 = 0, sum2 = 0;
 
-// float calculatePhaseDiff(uint8_t pin_ch1, uint8_t pin_ch2, float frequency_hz)
-// {
-//     // 初始化标志位
-//     _ch1_captured = false;
-//     _ch2_captured = false;
-
-//     // 设置引脚和中断
-//     pinMode(pin_ch1, INPUT);
-//     pinMode(pin_ch2, INPUT);
-
-//     attachInterrupt(digitalPinToInterrupt(pin_ch1), _isr_ch1, RISING);
-//     attachInterrupt(digitalPinToInterrupt(pin_ch2), _isr_ch2, RISING);
-
-//     // 等待两个通道捕获
-//     uint32_t start_time = micros();
-//     while (!_ch1_captured || !_ch2_captured) {
-//         if (micros() - start_time > 200000) { // 超时保护（200ms）
-//             detachInterrupt(digitalPinToInterrupt(pin_ch1));
-//             detachInterrupt(digitalPinToInterrupt(pin_ch2));
-//             return -1.0; // 表示失败
-//         }
-//         yield(); // 避免 watchdog reset
+//     for (int i = 0; i < CHANNEL_SAMPLE_COUNT; i++) {
+//         ch1[i] = adc16[2 * i]; // 通道 1 在偶数索引
+//         ch2[i] = adc16[2 * i + 1]; // 通道 2 在奇数索引
+//         sum1 += ch1[i];
+//         sum2 += ch2[i];
 //     }
 
-//     // 停止中断
-//     detachInterrupt(digitalPinToInterrupt(pin_ch1));
-//     detachInterrupt(digitalPinToInterrupt(pin_ch2));
+//     int16_t mean1 = sum1 / CHANNEL_SAMPLE_COUNT;
+//     int16_t mean2 = sum2 / CHANNEL_SAMPLE_COUNT;
 
-//     int32_t dt = (int32_t)(_ch2_time - _ch1_time);
-//     if (dt < 0)
-//         dt += 1000000; // 处理 micros() 回绕
+//     for (int i = 0; i < CHANNEL_SAMPLE_COUNT; i++) {
+//         ch1[i] -= mean1;
+//         ch2[i] -= mean2;
+//     }
 
-//     float period_us = 1e6 / frequency_hz;
-//     float phase = (dt / period_us) * 360.0;
-//     if (phase >= 360.0)
-//         phase -= 360.0;
+//     // 互相关计算
+//     int best_lag = 0;
+//     int64_t max_corr = INT64_MIN;
 
-//     return phase;
+//     for (int lag = -MAX_LAG; lag <= MAX_LAG; lag++) {
+//         int64_t corr = 0;
+//         for (int i = 0; i < CHANNEL_SAMPLE_COUNT; i++) {
+//             int j = i + lag;
+//             if (j >= 0 && j < CHANNEL_SAMPLE_COUNT) {
+//                 corr += (int32_t)ch1[i] * (int32_t)ch2[j];
+//             }
+//         }
+
+//         if (corr > max_corr) {
+//             max_corr = corr;
+//             best_lag = lag;
+//         }
+
+//         vTaskDelay(0);
+//     }
+
+//     // 将 kHz 转换为 Hz，计算一个周期内的采样点数
+//     float samples_per_period = (float)sample_rate / (freq * 1000.0f);
+
+//     // 相位差（单位：度）
+//     float phase_deg = ((float)best_lag / samples_per_period) * 360.0f;
+
+//     // 归一化到 [-180°, 180°]
+//     if (phase_deg < 0) {
+//         phase_deg += 180.0f;
+//     }
+//     if (phase_deg > 180.0f) {
+//         phase_deg = phase_deg - 360.0f;
+//     }
+
+//     return phase_deg;
 // }
+
+volatile uint32_t _ch1_time = 0;
+volatile uint32_t _ch2_time = 0;
+volatile bool _ch1_captured = false;
+volatile bool _ch2_captured = false;
+
+void IRAM_ATTR _isr_ch1()
+{
+    _ch1_time = micros();
+    _ch1_captured = true;
+    detachInterrupt(digitalPinToInterrupt(CH1_PHASE_DIFF_PIN)); // 禁止再次触发
+}
+
+void IRAM_ATTR _isr_ch2()
+{
+    _ch2_time = micros();
+    _ch2_captured = true;
+    detachInterrupt(digitalPinToInterrupt(CH2_PHASE_DIFF_PIN)); // 禁止再次触发
+}
+
+float last_phase_diff = 0.0f; // 用于存储上次计算的相位差
+
+float calculatePhaseDiff(float frequency_hz)
+{
+
+    _ch1_captured = false;
+    _ch2_captured = false;
+
+    pinMode(CH1_PHASE_DIFF_PIN, INPUT);
+    pinMode(CH2_PHASE_DIFF_PIN, INPUT);
+
+    // 步骤 1：等待 CH1
+    attachInterrupt(digitalPinToInterrupt(CH1_PHASE_DIFF_PIN), _isr_ch1, RISING);
+
+    uint32_t start_time = micros();
+    while (!_ch1_captured) {
+        if (micros() - start_time > 200000) { // 超时
+            detachInterrupt(digitalPinToInterrupt(CH1_PHASE_DIFF_PIN));
+            return NAN;
+        }
+        yield();
+    }
+
+    // 步骤 2：等待 CH2
+    attachInterrupt(digitalPinToInterrupt(CH2_PHASE_DIFF_PIN), _isr_ch2, RISING);
+    start_time = micros();
+    while (!_ch2_captured) {
+        if (micros() - start_time > 200000) {
+            detachInterrupt(digitalPinToInterrupt(CH2_PHASE_DIFF_PIN));
+            return NAN;
+        }
+        yield();
+    }
+
+    // 计算时间差（保留正负符号）
+    int32_t dt = (int32_t)(_ch2_time - _ch1_time);
+    if (dt < -500000)
+        dt += 1000000;
+    if (dt > 500000)
+        dt -= 1000000;
+
+    float period_us = 1e6 / frequency_hz;
+    float phase = (dt / period_us) * 360.0;
+
+    phase -= 5.0f; // 调整相位差，假设有5us的延迟
+
+    // 将相位归一到 [-180, +180)
+    if (phase >= 180.0)
+        phase -= 360.0;
+    if (phase < -180.0)
+        phase += 360.0;
+
+    return phase;
+}
 
 void taskWaveSet(void* arg)
 {

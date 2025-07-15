@@ -12,6 +12,9 @@ void setup()
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, HIGH);
 
+    pinMode(CH1_PHASE_DIFF_PIN, INPUT);
+    pinMode(CH2_PHASE_DIFF_PIN, INPUT);
+
     Serial.setRxBufferSize(8000);
     Serial.begin(921600);
     Serial.flush(false);

@@ -30,9 +30,9 @@ void taskTftInit()
     tft.fillRect(0, 0, 240, 146, TFT_BLACK);
     tft.fillRect(0, 174, 240, 66, TFT_BLACK);
 
-    xTaskCreatePinnedToCore(taskWaveSet, "WaveSet", 4096, NULL, 3, NULL, 0);
-    xTaskCreatePinnedToCore(taskWaveRefresh, "TftRefresh", 4096, NULL, 4, NULL, 1);
-    xTaskCreatePinnedToCore(taskPhaseDiffCalc, "PhaseDiffCalc", 8192 * 2, NULL, 5, NULL, 0);
+    xTaskCreatePinnedToCore(taskWaveSet, "WaveSet", 4096, NULL, 5, NULL, 0);
+    xTaskCreatePinnedToCore(taskWaveRefresh, "TftRefresh", 4096, NULL, 4, NULL, 0);
+    xTaskCreatePinnedToCore(taskPhaseDiffCalc, "PhaseDiffCalc", 8192 * 2, NULL, 3, NULL, 0);
 }
 
 /**
@@ -164,7 +164,7 @@ void taskWaveRefresh(void* arg)
         calculate_results = calculateInfo(recv_adc_buf_read_ptr_copy, recv_freq_buf, calculate_results);
         wave_info = generateWaveInfo(calculate_results, wave_info, wave_settings, recv_count);
 
-        if (abs(calculate_results.frequency[0] - calculate_results.frequency[1]) < 0.002f && calculate_results.frequency[0] > 0.05f) {
+        if (abs(calculate_results.frequency[0] - calculate_results.frequency[1]) < 0.004f && calculate_results.frequency[0] > 0.05f) {
             xEventGroupSetBits(data_ready_event_group, TASK_TFT_PHASE_EVENT_BIT);
             is_waiting_for_phase_diff = true;
         } else {
@@ -201,7 +201,7 @@ void taskPhaseDiffCalc(void* arg)
 {
     for (;;) {
         xEventGroupWaitBits(data_ready_event_group, TASK_TFT_PHASE_EVENT_BIT, pdTRUE, pdFALSE, portMAX_DELAY);
-        phase_diff = calculatePhaseDiff(recv_adc_buf_read_ptr_copy, wave_settings.is_high_sample_rate ? 250000 : 125000, calculate_results.frequency[0]);
+        phase_diff = calculatePhaseDiff(calculate_results.frequency[0] * 1000.0f);
         xEventGroupSetBits(data_ready_event_group, TASK_TFT_PHASE_READY_EVENT_BIT);
     }
 }

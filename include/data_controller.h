@@ -36,5 +36,5 @@ extern WaveSettings wave_settings;
 
 ChannelData calculateInfo(uint8_t* recv_adc_buf, uint8_t* recv_freq_buf, ChannelData results);
 WaveInfo generateWaveInfo(ChannelData calculate_results, WaveInfo wave_info, WaveSettings wave_settings, uint16_t recv_count);
-float calculatePhaseDiff(uint8_t* data, uint32_t sample_rate, float freq);
+float calculatePhaseDiff(float frequency_hz);
 
