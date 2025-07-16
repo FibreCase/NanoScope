@@ -15,7 +15,7 @@ void taskBluetoothRecvInit()
 {
     bt_fsm_mutex = xSemaphoreCreateMutex();
     bluetoothSerial.begin("Fibre_ESP32_OSC");
-    xTaskCreate(taskBluetoothRecv, "BluetoothRecv", 4096, NULL, 2, NULL);
+    xTaskCreatePinnedToCore(taskBluetoothRecv, "BluetoothRecv", 4096, NULL, 4, NULL, 1);
 }
 
 void bluetoothHeartbeat()
