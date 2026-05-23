@@ -2,7 +2,7 @@
 
 基于 ESP32 + TFT 的微型示波器项目。ESP32 负责串口接收 STM32 ADC 采样数据、实时波形绘制、频率与相位差计算、以及蓝牙通信；支持手机 App 远程控制显示参数。
 
-## 项目照片
+-> [STM32 采样前端项目地址](https://github.com/FibreCase/NanoScope-ADC)
 
 ![项目实物图](repo_files/images/final.png)
 
